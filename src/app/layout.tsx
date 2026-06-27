@@ -29,7 +29,9 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <CityGridProvider projection="isometric">{children}</CityGridProvider>
+        <CityGridProvider projection="isometric" width={12} height={10}>
+          {children}
+        </CityGridProvider>
       </body>
     </html>
   );

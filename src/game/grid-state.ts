@@ -1,11 +1,14 @@
 import type {
   Building,
+  BuildingProduction,
   CityGridState,
   GridCoordinate,
   GridProjection,
   GridTile,
+  InventoryResourceType,
   PlaceBuildingInput,
   ProductionStatus,
+  PlayerInventory,
 } from "./types"
 
 export type CityGridAction =
@@ -18,8 +21,80 @@ export type CityGridAction =
     }
   | { type: "placeRoad"; payload: GridCoordinate }
   | { type: "removeRoad"; payload: GridCoordinate }
+  | { type: "advanceTick" }
 
 export const toTileKey = (x: number, y: number) => `${x},${y}`
+
+const PRODUCTION_CATALOG: Record<
+  string,
+  { resource: InventoryResourceType; cycleSeconds: number; yieldAmount: number }
+> = {
+  "creative hub": {
+    resource: "communityGoods",
+    cycleSeconds: 5,
+    yieldAmount: 6,
+  },
+  "creative-hub": {
+    resource: "communityGoods",
+    cycleSeconds: 5,
+    yieldAmount: 6,
+  },
+  "solar array": {
+    resource: "cleanEnergy",
+    cycleSeconds: 4,
+    yieldAmount: 4,
+  },
+  "solar-array": {
+    resource: "cleanEnergy",
+    cycleSeconds: 4,
+    yieldAmount: 4,
+  },
+}
+
+const emptyInventory = (): PlayerInventory => ({
+  communityGoods: 0,
+  cleanEnergy: 0,
+})
+
+const normalizeBuildingType = (type: string) => type.trim().toLowerCase()
+
+const getProductionCatalogEntry = (type: string) =>
+  PRODUCTION_CATALOG[normalizeBuildingType(type)] ?? null
+
+const createProductionState = (
+  type: string,
+  level: number,
+): BuildingProduction | null => {
+  const profile = getProductionCatalogEntry(type)
+
+  if (!profile) {
+    return null
+  }
+
+  return {
+    resource: profile.resource,
+    cycleSeconds: profile.cycleSeconds,
+    secondsRemaining: profile.cycleSeconds,
+    yieldAmount: profile.yieldAmount + Math.max(level - 1, 0),
+  }
+}
+
+const isProductionBuilding = (type: string) =>
+  getProductionCatalogEntry(type) !== null
+
+const cloneInventory = (inventory: PlayerInventory): PlayerInventory => ({
+  communityGoods: inventory.communityGoods,
+  cleanEnergy: inventory.cleanEnergy,
+})
+
+const addInventoryResource = (
+  inventory: PlayerInventory,
+  resource: InventoryResourceType,
+  amount: number,
+): PlayerInventory => ({
+  ...inventory,
+  [resource]: inventory[resource] + amount,
+})
 
 export const createInitialCityGridState = (options?: {
   width?: number
@@ -54,6 +129,7 @@ export const createInitialCityGridState = (options?: {
     roadAnchors,
     tiles,
     buildings: {},
+    inventory: emptyInventory(),
   }
 }
 
@@ -178,9 +254,23 @@ const recomputeBuildingConnections = (state: CityGridState): CityGridState => {
   const buildings: Record<string, Building> = {}
 
   for (const building of Object.values(state.buildings)) {
+    const hasRoadConnection = getBuildingRoadConnection(state.tiles, building)
+    const production = building.production
+    const nextProduction = production
+      ? {
+          ...production,
+          secondsRemaining: production.secondsRemaining,
+        }
+      : null
+
     buildings[building.id] = {
       ...building,
-      hasRoadConnection: getBuildingRoadConnection(state.tiles, building),
+      hasRoadConnection,
+      productionStatus:
+        isProductionBuilding(building.type) && !hasRoadConnection
+          ? "paused"
+          : building.productionStatus,
+      production: nextProduction,
     }
   }
 
@@ -211,6 +301,79 @@ export const canPlaceBuilding = (
   return roadConnected
 }
 
+const advanceBuildingProduction = (
+  building: Building,
+  connected: boolean,
+): { building: Building; inventoryDelta: Partial<PlayerInventory> } => {
+  if (!building.production) {
+    return { building, inventoryDelta: {} }
+  }
+
+  if (!connected) {
+    return {
+      building: {
+        ...building,
+        productionStatus: "paused",
+      },
+      inventoryDelta: {},
+    }
+  }
+
+  const currentStatus =
+    building.productionStatus === "paused"
+      ? "producing"
+      : building.productionStatus
+
+  const activeProduction = {
+    ...building.production,
+    secondsRemaining:
+      building.production.secondsRemaining > 0
+        ? building.production.secondsRemaining
+        : building.production.cycleSeconds,
+  }
+
+  if (currentStatus !== "producing") {
+    return {
+      building: {
+        ...building,
+        productionStatus: currentStatus,
+        production: activeProduction,
+      },
+      inventoryDelta: {},
+    }
+  }
+
+  const secondsRemaining = activeProduction.secondsRemaining - 1
+
+  if (secondsRemaining > 0) {
+    return {
+      building: {
+        ...building,
+        productionStatus: "producing",
+        production: {
+          ...activeProduction,
+          secondsRemaining,
+        },
+      },
+      inventoryDelta: {},
+    }
+  }
+
+  return {
+    building: {
+      ...building,
+      productionStatus: "producing",
+      production: {
+        ...activeProduction,
+        secondsRemaining: activeProduction.cycleSeconds,
+      },
+    },
+    inventoryDelta: {
+      [activeProduction.resource]: activeProduction.yieldAmount,
+    },
+  }
+}
+
 const placeBuilding = (
   state: CityGridState,
   input: PlaceBuildingInput,
@@ -225,7 +388,10 @@ const placeBuilding = (
     size: input.size,
     level: input.level ?? 1,
     coordinates: input.coordinates,
-    productionStatus: input.productionStatus ?? "idle",
+    productionStatus:
+      input.productionStatus ??
+      (isProductionBuilding(input.type) ? "producing" : "idle"),
+    production: createProductionState(input.type, input.level ?? 1),
     hasRoadConnection: getBuildingRoadConnection(state.tiles, input),
   }
 
@@ -312,6 +478,41 @@ const setRoadState = (
   })
 }
 
+const advanceTick = (state: CityGridState): CityGridState => {
+  const nextBuildings: Record<string, Building> = {}
+  let nextInventory = cloneInventory(state.inventory)
+
+  for (const building of Object.values(state.buildings)) {
+    const updated = advanceBuildingProduction(
+      building,
+      building.hasRoadConnection,
+    )
+    nextBuildings[building.id] = updated.building
+
+    if (updated.inventoryDelta.communityGoods) {
+      nextInventory = addInventoryResource(
+        nextInventory,
+        "communityGoods",
+        updated.inventoryDelta.communityGoods,
+      )
+    }
+
+    if (updated.inventoryDelta.cleanEnergy) {
+      nextInventory = addInventoryResource(
+        nextInventory,
+        "cleanEnergy",
+        updated.inventoryDelta.cleanEnergy,
+      )
+    }
+  }
+
+  return {
+    ...state,
+    buildings: nextBuildings,
+    inventory: nextInventory,
+  }
+}
+
 export const cityGridReducer = (
   state: CityGridState,
   action: CityGridAction,
@@ -359,6 +560,8 @@ export const cityGridReducer = (
       return setRoadState(state, action.payload, true)
     case "removeRoad":
       return setRoadState(state, action.payload, false)
+    case "advanceTick":
+      return advanceTick(state)
     default:
       return state
   }

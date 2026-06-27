@@ -2,6 +2,8 @@ export type GridProjection = "orthogonal" | "isometric"
 
 export type ProductionStatus = "idle" | "producing" | "ready" | "paused"
 
+export type InventoryResourceType = "communityGoods" | "cleanEnergy"
+
 export interface GridCoordinate {
   x: number
   y: number
@@ -12,6 +14,13 @@ export interface BuildingSize {
   y: number
 }
 
+export interface BuildingProduction {
+  resource: InventoryResourceType
+  cycleSeconds: number
+  secondsRemaining: number
+  yieldAmount: number
+}
+
 export interface Building {
   id: string
   type: string
@@ -19,7 +28,13 @@ export interface Building {
   level: number
   coordinates: GridCoordinate
   productionStatus: ProductionStatus
+  production: BuildingProduction | null
   hasRoadConnection: boolean
+}
+
+export interface PlayerInventory {
+  communityGoods: number
+  cleanEnergy: number
 }
 
 export interface GridTile {
@@ -37,6 +52,7 @@ export interface CityGridState {
   roadAnchors: GridCoordinate[]
   tiles: Record<string, GridTile>
   buildings: Record<string, Building>
+  inventory: PlayerInventory
 }
 
 export interface PlaceBuildingInput {
